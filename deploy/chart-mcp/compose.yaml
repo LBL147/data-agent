@@ -1,0 +1,15 @@
+name: dodo-chart
+services:
+  antv-chart:
+    # 使用服务器已经构建成功的镜像；本文件不重新下载或构建。
+    image: mcp-server-chart:stable
+    command: ["node", "build/index.js", "--transport", "streamable", "--port", "1122", "--host", "0.0.0.0"]
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:1122:1122"
+    environment:
+      - NODE_ENV=production
+      # 未设置时沿用 AntV 默认服务；设置后应指向你验证过的私有渲染 API。
+      - VIS_REQUEST_SERVER
+    security_opt:
+      - no-new-privileges:true
