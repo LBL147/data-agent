@@ -2,6 +2,7 @@ package com.pangruixin.llm.mentor.agentx.common;
 
 import cn.dev33.satoken.exception.NotLoginException;
 import cn.dev33.satoken.exception.NotRoleException;
+import com.pangruixin.llm.mentor.agentx.service.FileAccessDeniedException;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -36,6 +37,12 @@ public class GlobalExceptionHandler {
         log.warn("无权限访问：requiredRole={}, type={}", e.getRole(), e.getLoginType());
         return ResponseEntity.status(HttpStatus.FORBIDDEN)
                 .body(R.forbidden("无权限访问"));
+    }
+
+    @ExceptionHandler(FileAccessDeniedException.class)
+    public ResponseEntity<R<Void>> handleFileAccessDenied(FileAccessDeniedException e) {
+        return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                .body(R.notFound(e.getMessage()));
     }
 
     @ExceptionHandler(IllegalArgumentException.class)

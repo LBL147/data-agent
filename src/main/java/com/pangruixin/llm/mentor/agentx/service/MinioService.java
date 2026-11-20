@@ -1,13 +1,14 @@
 package com.pangruixin.llm.mentor.agentx.service;
 
 import io.minio.BucketExistsArgs;
+import io.minio.DeleteBucketPolicyArgs;
 import io.minio.GetObjectArgs;
 import io.minio.GetObjectResponse;
 import io.minio.MakeBucketArgs;
 import io.minio.MinioClient;
 import io.minio.PutObjectArgs;
 import io.minio.RemoveObjectArgs;
-import io.minio.SetBucketPolicyArgs;
+import io.minio.errors.ErrorResponseException;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -18,7 +19,7 @@ import java.io.InputStream;
 
 /**
  * MinIO 文件存储服务。
- * 桶策略：publicRead（图表 / 上传文件都通过 URL 直接访问，与 dodo-agent 一致）。
+ * 上传文件只允许应用凭据访问，不开放匿名读取。
  */
 @Slf4j
 @Service
@@ -34,20 +35,31 @@ public class MinioService {
     private String bucketName;
 
     /**
-     * 启动时确保 bucket 存在
+     * 确保 bucket 存在，并移除匿名读取策略。
      */
     public void ensureBucket() {
         try {
             if (!minioClient.bucketExists(BucketExistsArgs.builder().bucket(bucketName).build())) {
                 minioClient.makeBucket(MakeBucketArgs.builder().bucket(bucketName).build());
-                String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"AWS\":[\"*\"]},\"Action\":[\"s3:GetObject\"],\"Resource\":[\"arn:aws:s3:::" + bucketName + "/*\"]}]}";
-                minioClient.setBucketPolicy(SetBucketPolicyArgs.builder()
-                        .bucket(bucketName).config(policy).build());
                 log.info("[dodo-agentx] MinIO bucket 创建完成: {}", bucketName);
             }
+            removePublicReadPolicy();
         } catch (Exception e) {
             log.error("[dodo-agentx] MinIO bucket 检查/创建失败: {}", e.getMessage(), e);
             throw new RuntimeException("MinIO 初始化失败: " + e.getMessage(), e);
+        }
+    }
+
+    private void removePublicReadPolicy() throws Exception {
+        try {
+            minioClient.deleteBucketPolicy(DeleteBucketPolicyArgs.builder()
+                    .bucket(bucketName)
+                    .build());
+        } catch (ErrorResponseException e) {
+            if (e.errorResponse() == null
+                    || !"NoSuchBucketPolicy".equals(e.errorResponse().code())) {
+                throw e;
+            }
         }
     }
 

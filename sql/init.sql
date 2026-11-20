@@ -888,6 +888,7 @@ DROP TABLE IF EXISTS `agentx_file`;
 CREATE TABLE `agentx_file`  (
   `id` bigint NOT NULL,
   `file_id` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL,
+  `owner_user_id` bigint NULL DEFAULT NULL COMMENT '文件所有者（sys_user.id）；NULL 表示历史归属未确认，默认拒绝访问',
   `file_name` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL,
   `file_type` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL,
   `file_size` bigint NULL DEFAULT NULL,
@@ -901,6 +902,7 @@ CREATE TABLE `agentx_file`  (
   `updated_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`) USING BTREE,
   UNIQUE INDEX `uk_file_id`(`file_id` ASC) USING BTREE,
+  INDEX `idx_agentx_file_owner`(`owner_user_id` ASC) USING BTREE,
   INDEX `idx_agentx_file_session`(`session_id` ASC) USING BTREE,
   INDEX `idx_agentx_file_conv`(`conversation_id` ASC) USING BTREE
 ) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci ROW_FORMAT = DYNAMIC;

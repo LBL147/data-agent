@@ -116,16 +116,17 @@ public class SessionService {
             return null;
         }
 
+        Long currentUserIdNumber = Long.valueOf(currentUserId);
         List<SessionMessageVO> messages = sessions.stream()
-                .map(this::buildSessionMessage)
+                .map(conv -> buildSessionMessage(conv, currentUserIdNumber))
                 .toList();
 
         return new ConversationDetailVO(conversationId, messages);
     }
 
-    private SessionMessageVO buildSessionMessage(AgentxConversation conv) {
+    private SessionMessageVO buildSessionMessage(AgentxConversation conv, Long currentUserId) {
         Long sessionId = conv.getSessionId() != null ? Long.parseLong(conv.getSessionId()) : null;
-        List<SessionMessageVO.AttachmentInfo> attachments = loadAttachments(sessionId);
+        List<SessionMessageVO.AttachmentInfo> attachments = loadAttachments(sessionId, currentUserId);
         List<Message> originalMessages = loadOriginalMessages(conv.getConversationId(), conv.getSessionId());
         String answer = extractAnswer(originalMessages);
         String timeline = buildTimeline(originalMessages);
@@ -306,11 +307,11 @@ public class SessionService {
     /**
      * 按 agentx_conversation 主键 id 反查该轮上传的文件元数据。
      */
-    private List<SessionMessageVO.AttachmentInfo> loadAttachments(Long convId) {
+    private List<SessionMessageVO.AttachmentInfo> loadAttachments(Long convId, Long currentUserId) {
         if (convId == null) {
             return List.of();
         }
-        List<AgentxFile> files = fileManageService.listBySessionId(convId);
+        List<AgentxFile> files = fileManageService.listBySessionId(convId, currentUserId);
         if (files == null || files.isEmpty()) {
             return List.of();
         }

@@ -29,6 +29,12 @@ public class AgentxFile implements Serializable {
     @TableField("file_id")
     private String fileId;
 
+    /**
+     * 文件所有者（sys_user.id）。历史记录无法可靠确认时保持 NULL，默认拒绝访问。
+     */
+    @TableField("owner_user_id")
+    private Long ownerUserId;
+
     @TableField("file_name")
     private String fileName;
 

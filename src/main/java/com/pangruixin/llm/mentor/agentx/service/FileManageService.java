@@ -1,6 +1,8 @@
 package com.pangruixin.llm.mentor.agentx.service;
 
 import com.pangruixin.llm.mentor.agentx.domain.entities.AgentxFile;
+import com.pangruixin.llm.mentor.agentx.domain.entities.AgentxConversation;
+import com.pangruixin.llm.mentor.agentx.mapper.AgentxConversationMapper;
 import com.pangruixin.llm.mentor.agentx.mapper.AgentxFileMapper;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
@@ -20,6 +22,7 @@ import org.springframework.web.multipart.MultipartFile;
 import javax.sql.DataSource;
 import java.io.InputStream;
 import java.time.LocalDateTime;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
@@ -56,6 +59,7 @@ public class FileManageService {
     private final FileParserService fileParserService;
     private final EmbeddingService embeddingService;
     private final AgentxFileMapper agentxFileMapper;
+    private final AgentxConversationMapper agentxConversationMapper;
 
     @Value("${file.large-file-threshold:5000}")
     private int largeFileThreshold;
@@ -67,6 +71,7 @@ public class FileManageService {
                 CREATE TABLE IF NOT EXISTS agentx_file (
                     id              BIGINT       NOT NULL,
                     file_id         VARCHAR(64)  NOT NULL,
+                    owner_user_id   BIGINT,
                     file_name       VARCHAR(255) NOT NULL,
                     file_type       VARCHAR(32),
                     file_size       BIGINT,
@@ -79,7 +84,8 @@ public class FileManageService {
                     created_at      TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
                     updated_at      TIMESTAMP    DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                     PRIMARY KEY (id),
-                    UNIQUE KEY uk_file_id (file_id)
+                    UNIQUE KEY uk_file_id (file_id),
+                    KEY idx_agentx_file_owner (owner_user_id)
                 ) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci
                 """);
         // 旧表升级：补加 session_id 列 + 索引（幂等：列已存在则跳过）
@@ -106,17 +112,26 @@ public class FileManageService {
      * 由 DodoAgent 在 stream Complete 事件中调用（Complete 携带 sessionId + conversationId）。
      */
     @Transactional(rollbackFor = Exception.class)
-    public void linkToSession(List<String> fileIds, Long sessionId, String conversationId) {
+    public void linkToSession(List<String> fileIds, Long sessionId, String conversationId,
+                              Long currentUserId) {
         if (fileIds == null || fileIds.isEmpty() || sessionId == null) {
             return;
         }
+        if (currentUserId == null) {
+            throw new FileAccessDeniedException();
+        }
+        validateSessionOwnership(sessionId, conversationId, currentUserId);
+        List<String> distinctFileIds = List.copyOf(new LinkedHashSet<>(fileIds));
+        validateAllFilesOwned(distinctFileIds, currentUserId);
         LambdaUpdateWrapper<AgentxFile> wrapper = new LambdaUpdateWrapper<AgentxFile>()
-                .in(AgentxFile::getFileId, fileIds)
+                .in(AgentxFile::getFileId, distinctFileIds)
+                .eq(AgentxFile::getOwnerUserId, currentUserId)
                 .set(AgentxFile::getSessionId, sessionId);
         if (conversationId != null && !conversationId.isBlank()) {
             wrapper.set(AgentxFile::getConversationId, conversationId);
         }
         int updated = agentxFileMapper.update(null, wrapper);
+        verifySessionLink(distinctFileIds, sessionId, conversationId, currentUserId);
         log.info("[dodo-agentx] 已 link 文件到 session: sessionId={}, convId={}, files={}, updated={}",
                 sessionId, conversationId, fileIds.size(), updated);
     }
@@ -124,12 +139,14 @@ public class FileManageService {
     /**
      * 按 sessionId 批量查询附件元数据（历史会话回放用）。
      */
-    public List<AgentxFile> listBySessionId(Long sessionId) {
-        if (sessionId == null) {
+    public List<AgentxFile> listBySessionId(Long sessionId, Long currentUserId) {
+        if (sessionId == null || currentUserId == null) {
             return List.of();
         }
         return agentxFileMapper.selectList(
-                new LambdaQueryWrapper<AgentxFile>().eq(AgentxFile::getSessionId, sessionId));
+                new LambdaQueryWrapper<AgentxFile>()
+                        .eq(AgentxFile::getSessionId, sessionId)
+                        .eq(AgentxFile::getOwnerUserId, currentUserId));
     }
 
     /**
@@ -139,36 +156,111 @@ public class FileManageService {
      * session_id 仍然在 Complete 事件后补写（用于历史回放按轮次取附件）。
      */
     @Transactional(rollbackFor = Exception.class)
-    public void linkToConversation(List<String> fileIds, String conversationId) {
+    public void linkToConversation(List<String> fileIds, String conversationId,
+                                   Long currentUserId) {
         if (fileIds == null || fileIds.isEmpty()
                 || conversationId == null || conversationId.isBlank()) {
             return;
         }
+        if (currentUserId == null) {
+            throw new FileAccessDeniedException();
+        }
+        validateConversationOwnership(conversationId, currentUserId);
+        List<String> distinctFileIds = List.copyOf(new LinkedHashSet<>(fileIds));
+        validateAllFilesOwned(distinctFileIds, currentUserId);
         LambdaUpdateWrapper<AgentxFile> wrapper = new LambdaUpdateWrapper<AgentxFile>()
-                .in(AgentxFile::getFileId, fileIds)
+                .in(AgentxFile::getFileId, distinctFileIds)
+                .eq(AgentxFile::getOwnerUserId, currentUserId)
                 .set(AgentxFile::getConversationId, conversationId);
         int updated = agentxFileMapper.update(null, wrapper);
+        verifyConversationLink(distinctFileIds, conversationId, currentUserId);
         log.info("[dodo-agentx] 已 link 文件到会话: convId={}, files={}, updated={}",
                 conversationId, fileIds.size(), updated);
+    }
+
+    private void validateConversationOwnership(String conversationId, Long currentUserId) {
+        List<AgentxConversation> existing = agentxConversationMapper.selectList(
+                new LambdaQueryWrapper<AgentxConversation>()
+                        .eq(AgentxConversation::getConversationId, conversationId));
+        String expectedUserId = currentUserId.toString();
+        if (existing != null && existing.stream()
+                .anyMatch(conv -> !expectedUserId.equals(conv.getUserId()))) {
+            throw new FileAccessDeniedException();
+        }
+    }
+
+    private void validateSessionOwnership(Long sessionId, String conversationId,
+                                          Long currentUserId) {
+        AgentxConversation target = agentxConversationMapper.selectOne(
+                new LambdaQueryWrapper<AgentxConversation>()
+                        .eq(AgentxConversation::getSessionId, sessionId.toString()));
+        if (target == null || !currentUserId.toString().equals(target.getUserId())) {
+            throw new FileAccessDeniedException();
+        }
+        if (conversationId != null && !conversationId.isBlank()
+                && !conversationId.equals(target.getConversationId())) {
+            throw new FileAccessDeniedException();
+        }
+    }
+
+    private void validateAllFilesOwned(List<String> fileIds, Long currentUserId) {
+        Long ownedCount = agentxFileMapper.selectCount(
+                new LambdaQueryWrapper<AgentxFile>()
+                        .in(AgentxFile::getFileId, fileIds)
+                        .eq(AgentxFile::getOwnerUserId, currentUserId));
+        if (ownedCount == null || ownedCount.longValue() != fileIds.size()) {
+            throw new FileAccessDeniedException();
+        }
+    }
+
+    private void verifyConversationLink(List<String> fileIds, String conversationId,
+                                        Long currentUserId) {
+        List<AgentxFile> linked = agentxFileMapper.selectList(
+                new LambdaQueryWrapper<AgentxFile>()
+                        .in(AgentxFile::getFileId, fileIds)
+                        .eq(AgentxFile::getOwnerUserId, currentUserId)
+                        .eq(AgentxFile::getConversationId, conversationId));
+        if (linked == null || linked.size() != fileIds.size()) {
+            throw new FileAccessDeniedException();
+        }
+    }
+
+    private void verifySessionLink(List<String> fileIds, Long sessionId, String conversationId,
+                                   Long currentUserId) {
+        LambdaQueryWrapper<AgentxFile> query = new LambdaQueryWrapper<AgentxFile>()
+                .in(AgentxFile::getFileId, fileIds)
+                .eq(AgentxFile::getOwnerUserId, currentUserId)
+                .eq(AgentxFile::getSessionId, sessionId);
+        if (conversationId != null && !conversationId.isBlank()) {
+            query.eq(AgentxFile::getConversationId, conversationId);
+        }
+        List<AgentxFile> linked = agentxFileMapper.selectList(query);
+        if (linked == null || linked.size() != fileIds.size()) {
+            throw new FileAccessDeniedException();
+        }
     }
 
     /**
      * 按会话 id 查询所有已成功处理的文件（按创建时间升序）。
      * DodoAgent.buildInstructions 用它拼 system prompt 的"当前会话文件"段。
      */
-    public List<AgentxFile> listByConversationId(String conversationId) {
-        if (conversationId == null || conversationId.isBlank()) {
+    public List<AgentxFile> listByConversationId(String conversationId, Long currentUserId) {
+        if (conversationId == null || conversationId.isBlank() || currentUserId == null) {
             return List.of();
         }
         return agentxFileMapper.selectList(
                 new LambdaQueryWrapper<AgentxFile>()
                         .eq(AgentxFile::getConversationId, conversationId)
+                        .eq(AgentxFile::getOwnerUserId, currentUserId)
                         .eq(AgentxFile::getStatus, "SUCCESS")
                         .orderByAsc(AgentxFile::getCreatedAt));
     }
 
     @Transactional(rollbackFor = Exception.class)
-    public AgentxFile uploadFile(MultipartFile file) {
+    public AgentxFile uploadFile(MultipartFile file, Long ownerUserId) {
+        if (ownerUserId == null) {
+            throw new FileAccessDeniedException();
+        }
         String fileId = UUID.randomUUID().toString();
         String fileType = extractExt(file.getOriginalFilename());
         long fileSize = file.getSize();
@@ -178,6 +270,7 @@ public class FileManageService {
 
         AgentxFile entity = new AgentxFile();
         entity.setFileId(fileId);
+        entity.setOwnerUserId(ownerUserId);
         entity.setFileName(file.getOriginalFilename());
         entity.setFileType(fileType);
         entity.setFileSize(fileSize);
@@ -246,16 +339,19 @@ public class FileManageService {
         throw new UnsupportedOperationException("图片识别已迁移至 analyzeFile 按需调用");
     }
 
-    public AgentxFile getFileInfo(String fileId) {
-        AgentxFile entity = findByFileId(fileId);
-        if (entity == null) {
-            throw new IllegalArgumentException("文件不存在: " + fileId);
+    public AgentxFile getFileInfo(String fileId, Long currentUserId) {
+        if (currentUserId == null) {
+            throw new FileAccessDeniedException();
+        }
+        AgentxFile entity = findByFileId(fileId, currentUserId);
+        if (entity == null || !currentUserId.equals(entity.getOwnerUserId())) {
+            throw new FileAccessDeniedException();
         }
         return entity;
     }
 
-    public String getFileContent(String fileId) {
-        AgentxFile entity = getFileInfo(fileId);
+    public String getFileContent(String fileId, Long currentUserId) {
+        AgentxFile entity = getFileInfo(fileId, currentUserId);
         if (!"SUCCESS".equals(entity.getStatus())) {
             throw new IllegalStateException("文件尚未处理完成，状态: " + entity.getStatus());
         }
@@ -266,8 +362,8 @@ public class FileManageService {
     /**
      * 从 MinIO 下载文件原始字节（analyzeFile 调多模态识别时用）。
      */
-    public byte[] downloadFileBytes(String fileId) {
-        AgentxFile entity = getFileInfo(fileId);
+    public byte[] downloadFileBytes(String fileId, Long currentUserId) {
+        AgentxFile entity = getFileInfo(fileId, currentUserId);
         if (StringUtils.isBlank(entity.getMinioPath())) {
             throw new IllegalStateException("文件未上传到对象存储: " + fileId);
         }
@@ -283,22 +379,16 @@ public class FileManageService {
      * 把图片识别后的描述写回 extracted_text（懒缓存）。
      * 下次 analyzeFile 同一图片直接走 cache，不再调多模态。
      */
-    public void saveExtractedText(String fileId, String text) {
-        AgentxFile entity = findByFileId(fileId);
-        if (entity == null) {
-            return;
-        }
+    public void saveExtractedText(String fileId, String text, Long currentUserId) {
+        AgentxFile entity = getFileInfo(fileId, currentUserId);
         entity.setExtractedText(text);
         entity.setUpdatedAt(LocalDateTime.now());
         agentxFileMapper.updateById(entity);
     }
 
     @Transactional(rollbackFor = Exception.class)
-    public void deleteFile(String fileId) {
-        AgentxFile entity = findByFileId(fileId);
-        if (entity == null) {
-            throw new IllegalArgumentException("文件不存在: " + fileId);
-        }
+    public void deleteFile(String fileId, Long currentUserId) {
+        AgentxFile entity = getFileInfo(fileId, currentUserId);
         try {
             if (StringUtils.isNotBlank(entity.getMinioPath())) {
                 String objectName = extractObjectName(entity.getMinioPath());
@@ -307,13 +397,20 @@ public class FileManageService {
         } catch (Exception e) {
             log.warn("[dodo-agentx] MinIO 删除失败（继续删 DB）: fileId={}, err={}", fileId, e.getMessage());
         }
-        agentxFileMapper.delete(new QueryWrapper<AgentxFile>().eq("file_id", fileId));
+        agentxFileMapper.delete(new QueryWrapper<AgentxFile>()
+                .eq("file_id", fileId)
+                .eq("owner_user_id", currentUserId));
         log.info("[dodo-agentx] 文件已删除: fileId={}", fileId);
     }
 
-    private AgentxFile findByFileId(String fileId) {
+    private AgentxFile findByFileId(String fileId, Long currentUserId) {
+        if (fileId == null || currentUserId == null) {
+            return null;
+        }
         return agentxFileMapper.selectOne(
-                new QueryWrapper<AgentxFile>().eq("file_id", fileId));
+                new QueryWrapper<AgentxFile>()
+                        .eq("file_id", fileId)
+                        .eq("owner_user_id", currentUserId));
     }
 
     private boolean isLargeFile(String text) {

@@ -1,13 +1,16 @@
 package com.pangruixin.llm.mentor.agentx.controller;
 
 import com.pangruixin.llm.mentor.agentx.common.R;
+import com.pangruixin.llm.mentor.agentx.auth.service.AuthService;
 import com.pangruixin.llm.mentor.agentx.domain.entities.AgentxFile;
 import com.pangruixin.llm.mentor.agentx.domain.vo.UploadResponse;
+import com.pangruixin.llm.mentor.agentx.service.FileAccessDeniedException;
 import com.pangruixin.llm.mentor.agentx.service.FileManageService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.CacheControl;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -20,7 +23,6 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.util.Map;
-import java.util.concurrent.TimeUnit;
 
 /**
  * 文件相关操作
@@ -41,6 +43,7 @@ public class FileController {
     );
 
     private final FileManageService fileManageService;
+    private final AuthService authService;
 
     @Value("${file.max-size-mb:100}")
     private long maxSizeMb;
@@ -60,7 +63,11 @@ public class FileController {
 
         log.info("[dodo-agentx] 收到上传: name={}, size={}", file.getOriginalFilename(), file.getSize());
         try {
-            AgentxFile saved = fileManageService.uploadFile(file);
+            Long currentUserId = authService.getCurrentUserIdOrNull();
+            if (currentUserId == null) {
+                return R.unauthorized("请先登录");
+            }
+            AgentxFile saved = fileManageService.uploadFile(file, currentUserId);
             return R.ok(UploadResponse.from(saved));
         } catch (Exception e) {
             log.error("[dodo-agentx] 上传失败", e);
@@ -73,15 +80,19 @@ public class FileController {
      */
     @GetMapping("/{fileId}/preview")
     public ResponseEntity<byte[]> preview(@PathVariable String fileId) {
+        Long currentUserId = authService.getCurrentUserIdOrNull();
+        if (currentUserId == null) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
+        }
         try {
-            AgentxFile meta = fileManageService.getFileInfo(fileId);
-            byte[] bytes = fileManageService.downloadFileBytes(fileId);
+            AgentxFile meta = fileManageService.getFileInfo(fileId, currentUserId);
+            byte[] bytes = fileManageService.downloadFileBytes(fileId, currentUserId);
             MediaType mime = IMAGE_MIME.getOrDefault(
                     meta.getFileType() == null ? "" : meta.getFileType().toLowerCase(),
                     MediaType.APPLICATION_OCTET_STREAM);
             return ResponseEntity.ok()
                     .contentType(mime)
-                    .cacheControl(CacheControl.maxAge(7, TimeUnit.DAYS).cachePublic())
+                    .cacheControl(CacheControl.noStore())
                     .contentLength(bytes.length)
                     .body(bytes);
         } catch (IllegalArgumentException e) {
@@ -96,15 +107,22 @@ public class FileController {
      * 文件删除
      */
     @DeleteMapping("/{fileId}")
-    public R<Void> delete(@PathVariable String fileId) {
+    public ResponseEntity<R<Void>> delete(@PathVariable String fileId) {
+        Long currentUserId = authService.getCurrentUserIdOrNull();
+        if (currentUserId == null) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                    .body(R.unauthorized("请先登录"));
+        }
         try {
-            fileManageService.deleteFile(fileId);
-            return R.ok();
-        } catch (IllegalArgumentException e) {
-            return R.notFound(e.getMessage());
+            fileManageService.deleteFile(fileId, currentUserId);
+            return ResponseEntity.ok(R.ok());
+        } catch (FileAccessDeniedException e) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                    .body(R.notFound(e.getMessage()));
         } catch (Exception e) {
             log.error("[dodo-agentx] 删除失败: fileId={}", fileId, e);
-            return R.fail("删除失败: " + e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(R.fail("删除失败: " + e.getMessage()));
         }
     }
 }

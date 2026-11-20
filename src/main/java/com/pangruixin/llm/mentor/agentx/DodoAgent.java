@@ -22,6 +22,7 @@ import com.agentx.ai.core.context.ContextPolicy;
 import com.agentx.ai.core.interrupt.JdbcPauseStateStore;
 
 import com.agentx.ai.core.model.AgentStreamEvent;
+import com.agentx.ai.core.model.PauseState;
 import com.agentx.ai.core.model.RunnableParams;
 import com.agentx.ai.core.model.ThinkingMode;
 import com.agentx.ai.core.tools.BashTool;
@@ -177,14 +178,15 @@ public class DodoAgent {
     public Flux<AgentStreamEvent> streamForResult(String query, RunnableParams params,
                                                   boolean online, List<String> fileIds) {
         String convId = params.getConversationId();
+        Long currentUserId = parseUserId(params.getUserId());
 
         // 本次新上传的文件立即关联到会话，让本轮 system prompt 能反查到
         if (fileIds != null && !fileIds.isEmpty()) {
-            fileManageService.linkToConversation(fileIds, convId);
+            fileManageService.linkToConversation(fileIds, convId, currentUserId);
         }
 
         // 会话所有文件（含本次新传），决定是否注入 analyzeFile
-        boolean hasAnyFile = !fileManageService.listByConversationId(convId).isEmpty();
+        boolean hasAnyFile = !fileManageService.listByConversationId(convId, currentUserId).isEmpty();
 
         String instructions = buildInstructions(params.getUserId(), convId, fileIds);
         ReactAgent agent = buildReactAgent(instructions, online, hasAnyFile);
@@ -195,7 +197,7 @@ public class DodoAgent {
         if (fileIds == null || fileIds.isEmpty()) {
             return baseFlux;
         }
-        return baseFlux.doOnNext(evt -> linkFilesFromEvent(fileIds, evt));
+        return baseFlux.doOnNext(evt -> linkFilesFromEvent(fileIds, currentUserId, evt));
     }
 
     /**
@@ -219,27 +221,29 @@ public class DodoAgent {
      */
     public Flux<AgentStreamEvent> resumeStream(Long userId, String conversationId, boolean online,
                                                List<String> fileIds, @Nullable String resumeQuery) {
-        if (!sharedStateStore.exists(conversationId)) {
+        PauseState pausedState = sharedStateStore.findByConversationId(conversationId);
+        if (pausedState == null) {
             return Flux.error(new IllegalStateException(
                     "No interrupted state for conversation: " + conversationId));
         }
+        ResumeOwnershipGuard.requireOwner(pausedState, userId);
         // 本次新上传的文件立即关联到会话
         if (fileIds != null && !fileIds.isEmpty()) {
-            fileManageService.linkToConversation(fileIds, conversationId);
+            fileManageService.linkToConversation(fileIds, conversationId, userId);
         }
-        boolean hasAnyFile = !fileManageService.listByConversationId(conversationId).isEmpty();
+        boolean hasAnyFile = !fileManageService.listByConversationId(conversationId, userId).isEmpty();
         String instructions = buildInstructions(
                 userId == null ? null : userId.toString(), conversationId, fileIds);
         ReactAgent agent = buildReactAgent(instructions, online, hasAnyFile);
         return agent.resumeStream(conversationId, resumeQuery)
-                .doOnNext(evt -> linkFilesFromEvent(fileIds, evt));
+                .doOnNext(evt -> linkFilesFromEvent(fileIds, userId, evt));
     }
 
     /**
      * 从流式事件中提取 sessionId，关联文件到 session。
      * Complete（正常完成）和 Paused（用户中断）都处理。
      */
-    private void linkFilesFromEvent(List<String> fileIds, AgentStreamEvent evt) {
+    private void linkFilesFromEvent(List<String> fileIds, Long currentUserId, AgentStreamEvent evt) {
         if (fileIds == null || fileIds.isEmpty()) {
             return;
         }
@@ -254,7 +258,7 @@ public class DodoAgent {
         }
         if (sessionId != null) {
             try {
-                fileManageService.linkToSession(fileIds, sessionId, conversationId);
+                fileManageService.linkToSession(fileIds, sessionId, conversationId, currentUserId);
             } catch (Exception e) {
                 log.warn("[dodo-agentx] link 文件失败（不影响主流程）: sessionId={}, fileIds={}",
                         sessionId, fileIds, e);
@@ -271,18 +275,18 @@ public class DodoAgent {
         String base = (userId == null)
                 ? SystemPrompt.build("")
                 : SystemPrompt.build(userContextBuilder.build(userId));
-        return appendSessionFiles(base, conversationId, currentFileIds);
+        return appendSessionFiles(base, conversationId, currentFileIds, userId);
     }
 
     /**
      * 把会话文件分两组展示：本次新上传（一组）+ 历史文件（按 session_id 分多组，同一轮上传的聚在一起）。
      */
     private String appendSessionFiles(String instructions, String conversationId,
-                                      List<String> currentFileIds) {
+                                      List<String> currentFileIds, Long currentUserId) {
         if (conversationId == null || conversationId.isBlank()) {
             return instructions;
         }
-        List<AgentxFile> files = fileManageService.listByConversationId(conversationId);
+        List<AgentxFile> files = fileManageService.listByConversationId(conversationId, currentUserId);
         if (files.isEmpty()) {
             return instructions;
         }

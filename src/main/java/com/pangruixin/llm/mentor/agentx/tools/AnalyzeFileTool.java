@@ -39,23 +39,29 @@ public class AnalyzeFileTool {
             "大文件传 question 做语义检索。普通对话不要调本工具。")
     public String analyzeFile(
             @ToolParam(description = "文件 ID（UUID）") String fileId,
-            @ToolParam(description = "用户问题，用于 RAG 语义检索") String question) {
+            @ToolParam(description = "用户问题，用于 RAG 语义检索") String question,
+            @ToolParam(description = "用户身份标识。参数名必须是 userId，由框架自动注入真实值", required = false)
+            String userId) {
 
         log.info("[dodo-agentx] EXECUTE analyzeFile: fileId={}, question={}", fileId, question);
 
         if (fileId == null || fileId.trim().isEmpty()) {
             return "文件 ID 不能为空";
         }
+        Long currentUserId = parseUserId(userId);
+        if (currentUserId == null) {
+            return "文件访问身份无效";
+        }
 
         try {
-            AgentxFile file = fileManageService.getFileInfo(fileId);
+            AgentxFile file = fileManageService.getFileInfo(fileId, currentUserId);
             if (!"SUCCESS".equals(file.getStatus())) {
                 return String.format("文件处理中或处理失败，状态: %s, fileId: %s", file.getStatus(), fileId);
             }
 
             // 图片：按需调多模态（首次识别后懒写回 extracted_text 缓存）
             if (fileManageService.isImageFile(file.getFileType())) {
-                return handleImage(file);
+                return handleImage(file, currentUserId);
             }
 
             // 文本：embed=1 走 RAG，否则直接返回 extracted_text
@@ -82,19 +88,19 @@ public class AnalyzeFileTool {
      * - extracted_text 已有 → 直接返回（缓存命中）
      * - 否则 → MinIO 下载字节 → MultimodalService 识别 → 写回 DB → 返回
      */
-    private String handleImage(AgentxFile file) {
+    private String handleImage(AgentxFile file, Long currentUserId) {
         if (StringUtils.isNotBlank(file.getExtractedText())) {
             log.info("[dodo-agentx] 图片识别缓存命中: fileId={}", file.getFileId());
             return buildResponse(file, file.getExtractedText(), null, true);
         }
 
         log.info("[dodo-agentx] 首次读取图片，调用多模态识别: fileId={}", file.getFileId());
-        byte[] bytes = fileManageService.downloadFileBytes(file.getFileId());
+        byte[] bytes = fileManageService.downloadFileBytes(file.getFileId(), currentUserId);
         String description = multimodalService.imageToText(bytes, file.getFileName());
 
         // 懒缓存：写回 extracted_text，下次直接命中
         try {
-            fileManageService.saveExtractedText(file.getFileId(), description);
+            fileManageService.saveExtractedText(file.getFileId(), description, currentUserId);
         } catch (Exception cacheErr) {
             log.warn("[dodo-agentx] 图片识别结果写回缓存失败（不影响本次返回）: fileId={}, err={}",
                     file.getFileId(), cacheErr.getMessage());
@@ -125,5 +131,16 @@ public class AnalyzeFileTool {
             sb.append("无内容可显示");
         }
         return sb.toString();
+    }
+
+    private static Long parseUserId(String userId) {
+        if (StringUtils.isBlank(userId) || "default".equalsIgnoreCase(userId)) {
+            return null;
+        }
+        try {
+            return Long.parseLong(userId.trim());
+        } catch (NumberFormatException e) {
+            return null;
+        }
     }
 }
