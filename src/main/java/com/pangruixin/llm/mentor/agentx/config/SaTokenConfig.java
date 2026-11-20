@@ -15,7 +15,7 @@ import java.util.Set;
 /**
  * Sa-Token 配置：
  * 1. 注册全局拦截器，对除登录接口、静态资源外的所有接口做登录校验
- * 2. /sys/** 强制要求 admin 角色
+ * 2. /sys/**、/api/skills/**、/api/eval/** 强制要求 admin 角色
  */
 @Configuration
 public class SaTokenConfig implements WebMvcConfigurer {
@@ -51,6 +51,10 @@ public class SaTokenConfig implements WebMvcConfigurer {
 
             // 强制要求 admin 角色（Skill管理）
             SaRouter.match("/api/skills/**")
+                    .check(r -> StpUtil.checkRole("admin"));
+
+            // 强制要求 admin 角色（评测健康检查）
+            SaRouter.match("/api/eval/**")
                     .check(r -> StpUtil.checkRole("admin"));
         })).addPathPatterns("/**");
     }

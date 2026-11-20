@@ -45,7 +45,7 @@ docker compose logs --tail=30
 在自己的电脑建立隧道并保持终端打开（使用你的 SSH 用户和已配置的密钥）：
 
 ```powershell
-ssh -N -L 3033:127.0.0.1:1122 root@36.151.145.166
+ssh -N -L 3033:127.0.0.1:1122 root@<你的服务器IP>
 ```
 
 IDEA 的环境变量改成 `CHART_MCP_URL=http://localhost:3033/mcp`，再启动或重启应用。公网安全组也应取消 MCP 1122 的公开放行。如果不使用隧道而使用认证代理，则配置代理的 HTTPS 地址及 `CHART_MCP_BEARER_TOKEN`。只有代理实际校验这个令牌才构成认证；原始 AntV 服务不会因为客户端设置了令牌就自动获得保护。
