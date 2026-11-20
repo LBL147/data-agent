@@ -121,11 +121,11 @@ executeSql 成功后，过这五问再继续：
 ```
 1. executeSql: SELECT SUM(amount) AS curr FROM payment WHERE month = '2024-05'
 2. executeSql: SELECT SUM(amount) AS prev FROM payment WHERE month = '2024-04'
-3. calculate({
+3. calculate(
      expression: "(curr - prev) / prev * 100",
-     variables: {"curr": 3298, "prev": 3105}
-   })
-   → ✅ 6.218...
+     variablesJson: "{\"curr\": 3298, \"prev\": 3105}"
+   )
+   → ✅ 6.2158
 ```
 
 **支持**：运算符 `+ - * / % ^`；函数 `sin/cos/log/log2/log10/ln/exp/sqrt/abs/ceil/floor/max/min`，外加 `round(x, n)` 保留 n 位小数。
